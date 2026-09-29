@@ -179,11 +179,13 @@ func (m *hunyuanProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName
 
 	// 使用混元本身接口的协议
 	if m.config.protocol == protocolOriginal {
-		if apiName == ApiNameEmbeddings {
-			// Embeddings requests are native passthrough: the body is not a
-			// hunyuanTextGenRequest, so leave it untouched and sign it with the
-			// Embeddings action. The context file only applies to chat.
-			authorizedValue := GetTC3Authorizationcode(m.config.hunyuanAuthId, m.config.hunyuanAuthKey, timestamp, hunyuanDomain, hunyuanEmbeddingsTCAction, string(body))
+		// Sign and forward the body as-is unless a context file requires
+		// parsing to insert the context message: re-marshalling through
+		// hunyuanTextGenRequest drops every native field the struct does not
+		// model (MaxTokens, Stop, ...), silently defeating protocol:original
+		// (#4876). The context file only applies to chat.
+		if m.config.context == nil || apiName == ApiNameEmbeddings {
+			authorizedValue := GetTC3Authorizationcode(m.config.hunyuanAuthId, m.config.hunyuanAuthKey, timestamp, hunyuanDomain, hunyuanTCActionForApiName(apiName), string(body))
 			_ = util.OverwriteRequestAuthorization(authorizedValue)
 			_ = proxywasm.ReplaceHttpRequestHeader("Accept", "*/*")
 			return types.ActionContinue, nil
