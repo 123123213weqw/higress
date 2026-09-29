@@ -1215,7 +1215,7 @@ data: [DONE]
 				Request: http.AssertionRequest{
 					ActualRequest: http.Request{
 						Host:        "api.cohere.com",
-						Path:        "/v1/chat",
+						Path:        "/v1/chat/completions",
 						Method:      "POST",
 						ContentType: http.ContentTypeApplicationJson,
 						Body:        []byte(`{"model":"gpt-3","messages":[{"role":"user","content":"你好，你是谁？"}],"stream":false}`),
@@ -1237,7 +1237,7 @@ data: [DONE]
 				Request: http.AssertionRequest{
 					ActualRequest: http.Request{
 						Host:        "api.cohere.com",
-						Path:        "/v1/chat",
+						Path:        "/v1/chat/completions",
 						Method:      "POST",
 						ContentType: http.ContentTypeApplicationJson,
 						Body:        []byte(`{"model":"gpt-3","messages":[{"role":"user","content":"你好，你是谁？"}],"stream":true}`),
