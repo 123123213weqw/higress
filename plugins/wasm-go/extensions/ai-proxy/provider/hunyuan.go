@@ -237,6 +237,33 @@ func (m *hunyuanProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName
 	}
 
 	// 使用open ai接口协议
+	if apiName == ApiNameEmbeddings {
+		// Convert the OpenAI embeddings request to the native hunyuan
+		// Embeddings action and sign it. Without this, embeddings requests
+		// fell through to the chat conversion below and failed with a
+		// chat-specific error (#4876).
+		embeddingsRequest := &openAIEmbeddingsRequest{}
+		if err := json.Unmarshal(body, embeddingsRequest); err != nil {
+			return types.ActionContinue, fmt.Errorf("unable to unmarshal embeddings request: %v", err)
+		}
+		input := parseEmbeddingsInput(embeddingsRequest.Input)
+		if embeddingsRequest.Model == "" || len(input) == 0 {
+			return types.ActionContinue, errors.New("missing model or input in embeddings request")
+		}
+		ctx.SetContext(ctxKeyOriginalRequestModel, embeddingsRequest.Model)
+		mappedModel := getMappedModel(embeddingsRequest.Model, m.config.modelMapping)
+		ctx.SetContext(ctxKeyFinalRequestModel, mappedModel)
+		hunyuanRequest := &hunyuanEmbeddingsRequest{Model: mappedModel, Input: input}
+		embeddingsBody, err := json.Marshal(hunyuanRequest)
+		if err != nil {
+			return types.ActionContinue, err
+		}
+		authorizedValueNew := GetTC3Authorizationcode(m.config.hunyuanAuthId, m.config.hunyuanAuthKey, timestamp, hunyuanDomain, hunyuanTCActionForApiName(apiName), string(embeddingsBody))
+		_ = util.OverwriteRequestAuthorization(authorizedValueNew)
+		_ = proxywasm.ReplaceHttpRequestHeader("Accept", "*/*")
+		return types.ActionContinue, replaceRequestBody(embeddingsBody)
+	}
+
 	request := &chatCompletionRequest{}
 	if err := decodeChatCompletionRequest(body, request); err != nil {
 		return types.ActionContinue, err
@@ -427,6 +454,14 @@ func (m *hunyuanProvider) TransformResponseBody(ctx wrapper.HttpContext, apiName
 	if m.config.IsOriginal() || m.useOpenAICompatibleAPI() {
 		return body, nil
 	}
+	if apiName == ApiNameEmbeddings {
+		hunyuanResponse := &hunyuanEmbeddingsResponse{}
+		if err := json.Unmarshal(body, hunyuanResponse); err != nil {
+			return nil, fmt.Errorf("unable to unmarshal hunyuan embeddings response: %v", err)
+		}
+		model, _ := ctx.GetContext(ctxKeyFinalRequestModel).(string)
+		return json.Marshal(buildOpenAIEmbeddingsResponse(model, hunyuanResponse))
+	}
 	if apiName != ApiNameChatCompletion {
 		return body, nil
 	}
@@ -437,6 +472,90 @@ func (m *hunyuanProvider) TransformResponseBody(ctx wrapper.HttpContext, apiName
 	}
 	response := m.buildChatCompletionResponse(ctx, hunyuanResponse)
 	return json.Marshal(response)
+}
+
+// openAIEmbeddingsRequest models the OpenAI embeddings request; Input is
+// kept raw because the API allows either a string or an array of strings.
+type openAIEmbeddingsRequest struct {
+	Model string          `json:"model"`
+	Input json.RawMessage `json:"input"`
+}
+
+// parseEmbeddingsInput normalizes the OpenAI embeddings input (a string or
+// an array of strings) to a string slice.
+func parseEmbeddingsInput(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var single string
+	if err := json.Unmarshal(raw, &single); err == nil {
+		return []string{single}
+	}
+	var multiple []string
+	if err := json.Unmarshal(raw, &multiple); err == nil {
+		return multiple
+	}
+	return nil
+}
+
+// hunyuanEmbeddingsRequest is the native Tencent Hunyuan Embeddings action body.
+type hunyuanEmbeddingsRequest struct {
+	Model string   `json:"Model"`
+	Input []string `json:"Input"`
+}
+
+// hunyuanEmbeddingsResponse is the native Tencent Hunyuan Embeddings action
+// response envelope.
+type hunyuanEmbeddingsResponse struct {
+	Response struct {
+		Embeddings []struct {
+			Embedding []float64 `json:"Embedding"`
+			Index     int       `json:"Index"`
+		} `json:"Embeddings"`
+		Usage struct {
+			TotalTokens int `json:"TotalTokens"`
+		} `json:"Usage"`
+		RequestId string `json:"RequestId"`
+	} `json:"Response"`
+}
+
+type openAIEmbeddingsResponse struct {
+	Object string                  `json:"object"`
+	Data   []openAIEmbeddingObject `json:"data"`
+	Model  string                  `json:"model"`
+	Usage  openAIEmbeddingsUsage   `json:"usage"`
+}
+
+type openAIEmbeddingObject struct {
+	Object    string    `json:"object"`
+	Embedding []float64 `json:"embedding"`
+	Index     int       `json:"index"`
+}
+
+type openAIEmbeddingsUsage struct {
+	PromptTokens int `json:"prompt_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}
+
+// buildOpenAIEmbeddingsResponse converts a native Hunyuan Embeddings
+// response into the OpenAI embeddings response format.
+func buildOpenAIEmbeddingsResponse(model string, hunyuanResponse *hunyuanEmbeddingsResponse) *openAIEmbeddingsResponse {
+	response := &openAIEmbeddingsResponse{
+		Object: "list",
+		Model:  model,
+		Usage: openAIEmbeddingsUsage{
+			PromptTokens: hunyuanResponse.Response.Usage.TotalTokens,
+			TotalTokens:  hunyuanResponse.Response.Usage.TotalTokens,
+		},
+	}
+	for _, embedding := range hunyuanResponse.Response.Embeddings {
+		response.Data = append(response.Data, openAIEmbeddingObject{
+			Object:    "embedding",
+			Embedding: embedding.Embedding,
+			Index:     embedding.Index,
+		})
+	}
+	return response
 }
 
 func (m *hunyuanProvider) insertContextMessageIntoHunyuanRequest(request *hunyuanTextGenRequest, content string) {
