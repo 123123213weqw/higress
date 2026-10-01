@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"sync"
 	"strconv"
 
 	"strings"
@@ -1059,6 +1060,23 @@ func getMappedModel(model string, modelMapping map[string]string) string {
 	return model
 }
 
+// mappedModelRegexCache caches compiled modelMapping regex patterns.
+// modelMapping is consulted on every request; compiling the same pattern
+// each time showed up as avoidable per-request work (#4883).
+var mappedModelRegexCache sync.Map // pattern string -> *regexp.Regexp
+
+func compiledMappedModelRegex(pattern string) (*regexp.Regexp, error) {
+	if cached, ok := mappedModelRegexCache.Load(pattern); ok {
+		return cached.(*regexp.Regexp), nil
+	}
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	mappedModelRegexCache.Store(pattern, compiled)
+	return compiled, nil
+}
+
 func doGetMappedModel(model string, modelMapping map[string]string) string {
 	if len(modelMapping) == 0 {
 		return ""
@@ -1081,7 +1099,11 @@ func doGetMappedModel(model string, modelMapping map[string]string) string {
 	sort.Strings(regexKeys)
 	for _, k := range regexKeys {
 		pattern := strings.TrimPrefix(k, "~")
-		re := regexp.MustCompile(pattern)
+		re, err := compiledMappedModelRegex(pattern)
+		if err != nil {
+			log.Errorf("invalid model mapping regex [%s]: %v", pattern, err)
+			continue
+		}
 		if re.MatchString(model) {
 			v := re.ReplaceAllString(model, modelMapping[k])
 			log.Debugf("model [%s] is mapped to [%s] via regex [%s]", model, v, pattern)
